@@ -264,6 +264,21 @@ def test_statewide_references_that_states_airports():
     assert aircraft[0]["state"] == "maneuvering/pattern"
 
 
+def test_web_app_builds_without_polling():
+    # The production entry point (wsgi.py) builds the app this way; with
+    # start_polling=False no thread starts and no network is touched, so
+    # this doubles as a smoke test of the Flask routes.
+    from main import build_web_app
+
+    app = build_web_app(config.AIRPORT, start_polling=False)
+    client = app.test_client()
+    assert client.get("/").status_code == 200
+    data = client.get("/api/traffic").get_json()
+    assert data["airport"]["name"] == config.AIRPORT.name
+    assert data["statewide"] is False
+    assert client.get("/api/border/Colorado").status_code == 200
+
+
 def test_state_bounds_table_sane():
     # 50 states, every box well-formed and inside plausible US ranges.
     assert len(config.US_STATE_BOUNDS) == 50

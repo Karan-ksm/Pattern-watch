@@ -1,3 +1,4 @@
 requests>=2.31
 flask>=3.0
 pytest>=8.0
+gunicorn>=21

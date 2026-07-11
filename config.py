@@ -5,6 +5,7 @@ airport being watched, the size of the watch box, the poll rate, and all
 the thresholds used by the state heuristics in traffic.py.
 """
 
+import os
 from typing import NamedTuple
 
 from airports_data import AIRPORTS_BY_STATE as _GENERATED_AIRPORTS
@@ -105,7 +106,14 @@ CEILING_AGL_FT = 3500
 
 # --- Polling ----------------------------------------------------------------
 
-POLL_INTERVAL_S = 15
+# Overridable via environment so a hosted demo can poll more slowly
+# (stretching the OpenSky credit budget) without code edits.
+POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", 15))
+
+# Web mode: stop polling when nobody has looked at the page for this
+# long, and resume on the next visit. Matters most for a deployed demo —
+# no reason to spend API credits on a picture nobody is watching.
+IDLE_AFTER_S = 300
 
 # An aircraft missing from this many consecutive polls is considered to
 # have left the area. OpenSky's low-altitude coverage flickers, so we do
@@ -147,4 +155,6 @@ OPENSKY_TOKEN_URL = (
 # --- Display -----------------------------------------------------------------
 
 EVENT_LOG_SIZE = 30  # how many recent arrive/leave events to keep
-WEB_PORT = 5050  # not 5000: macOS AirPlay Receiver squats on that port
+# Local dev port (not 5000: macOS AirPlay squats on it). In production
+# gunicorn binds the port itself, so this is dev-only.
+WEB_PORT = int(os.environ.get("WEB_PORT", 5050))

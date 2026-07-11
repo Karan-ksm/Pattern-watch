@@ -110,13 +110,20 @@ def create_web_app(shared):
     @app.route("/api/traffic")
     def api_traffic():
         with shared["lock"]:
-            return jsonify(
+            # Mark the demo as watched so the poll loop keeps running
+            # (it pauses after IDLE_AFTER_S without visitors).
+            was_idle = str(shared["status"]).startswith("idle")
+            shared["last_seen"] = time.time()
+            response = jsonify(
                 aircraft=shared["aircraft"],
                 events=shared["events"],
                 updated_at=shared["updated_at"],
                 status=shared["status"],
                 **_selection_payload(shared["airport"], shared["state"]),
             )
+        if was_idle:
+            shared["switch"].set()  # wake the poll loop immediately
+        return response
 
     @app.route("/api/airport", methods=["POST"])
     def set_airport():

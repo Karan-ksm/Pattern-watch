@@ -4,6 +4,9 @@ A live traffic picture for untowered airports — any GA field in any US
 state — built on free ADS-B data from the
 [OpenSky Network](https://opensky-network.org/).
 
+**Live demo:** _coming soon_ <!-- replace with your Render URL after deploying -->
+(free hosting sleeps when idle — the first visit takes ~30–60 s to wake)
+
 ## Why
 
 About 90% of US airports have no control tower. There is no controller and
@@ -38,7 +41,7 @@ python main.py --mode web
 # Watch a field that isn't in the built-in list (lat, lon, elev ft, name)
 python main.py --mode web --airport "39.9088,-105.1172,5673,Rocky Mountain Metro (KBJC)"
 
-# Run the tests (27, no network needed)
+# Run the tests (28, no network needed)
 pytest
 ```
 
@@ -113,7 +116,9 @@ traffic, raise `CEILING_AGL_FT` in `config.py`.
 | `tools/generate_airports.py` | regenerates `airports_data.py` (downloads the dataset) |
 | `tools/generate_borders.py` | regenerates `state_borders.json` |
 | `templates/index.html` | the whole web UI — one file, CDN Leaflet, no build step |
-| `tests/test_traffic.py` | 27 pytest cases: heuristics, tracker, borders, data sanity |
+| `wsgi.py` | production entry point (gunicorn, single worker) |
+| `render.yaml` | one-click deploy blueprint for Render's free tier |
+| `tests/test_traffic.py` | 28 pytest cases: heuristics, tracker, borders, data sanity |
 | `conftest.py` | empty on purpose — makes pytest put the project root on `sys.path` |
 
 ## How the state labels work
@@ -167,6 +172,34 @@ airport — fine for demo sessions, but for all-day running raise
 `POLL_INTERVAL_S` in `config.py` (30 s halves the burn). When the budget
 runs out the status badge shows "rate limited" and polling resumes
 automatically once it resets.
+
+## Deploying (free)
+
+The repo includes `render.yaml`, a blueprint for [Render](https://render.com)'s
+free tier:
+
+1. Sign in to Render with GitHub, click **New + → Blueprint**, and pick
+   this repo — it reads `render.yaml` and creates the web service
+   (gunicorn serving `wsgi.py`, one worker, because the poller and the
+   traffic snapshot live in that process's memory).
+2. In the service's **Environment** tab, add `OPENSKY_CLIENT_ID` and
+   `OPENSKY_CLIENT_SECRET` (strongly recommended for hosting — anonymous
+   credits run out fast). `POLL_INTERVAL_S` is preset to 30 s to stretch
+   the budget.
+3. Your app is live at `https://<service-name>.onrender.com` — put the
+   link at the top of this README.
+
+Hosted-demo behavior worth knowing:
+
+- **The view is shared.** There is one poller and one picture per server,
+  so every visitor sees — and can change — the same state/airport (the
+  sidebar says so). Per-visitor views would need per-session pollers;
+  out of scope for this demo.
+- **Polling pauses when nobody is watching** (5 min without a visitor)
+  and resumes on the next page load, so an unvisited demo spends no API
+  credits.
+- **Free instances sleep** after ~15 min idle; the first request
+  afterwards takes ~30–60 s while Render wakes it.
 
 ## Data sources
 

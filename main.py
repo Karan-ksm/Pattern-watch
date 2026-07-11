@@ -72,8 +72,12 @@ def find_home_state(airport):
     return config.DEFAULT_STATE
 
 
-def run_web(airport):
-    """Poll in a background thread; Flask serves the latest snapshot.
+def build_web_app(airport, start_polling=True):
+    """Assemble web mode: shared state, poll thread, and the Flask app.
+
+    Used by run_web() for local dev and by wsgi.py under gunicorn. All
+    state is in-memory and the poller is a single daemon thread, which is
+    why the production server must run exactly ONE worker process.
 
     The web UI picks a state, then an airport in it (or the whole state).
     The Flask side writes the choice into shared["state"]/["airport"] and
@@ -96,12 +100,25 @@ def run_web(airport):
         "events": [],
         "updated_at": None,
         "status": "waiting for first poll",
+        "last_seen": time.time(),  # when someone last fetched /api/traffic
     }
 
     def poll_loop():
         current = None
         poller = tracker = None
         while True:
+            # Idle pause: nobody has looked at the page recently, so
+            # don't spend OpenSky credits on a picture nobody sees.
+            # /api/traffic wakes us instantly via the switch event.
+            with shared["lock"]:
+                idle = time.time() - shared["last_seen"] > config.IDLE_AFTER_S
+                if idle:
+                    shared["status"] = "idle - open the page to resume"
+            if idle:
+                if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
+                    shared["switch"].clear()
+                continue
+
             with shared["lock"]:
                 wanted = shared["airport"]
                 state = shared["state"]
@@ -135,12 +152,21 @@ def run_web(airport):
                 shared["switch"].clear()
 
     # Daemon thread: dies with the main process, no shutdown dance needed.
-    threading.Thread(target=poll_loop, daemon=True).start()
+    # (start_polling=False exists for tests, which want the app without
+    # any network activity.)
+    if start_polling:
+        threading.Thread(target=poll_loop, daemon=True).start()
 
-    app = create_web_app(shared)
+    return create_web_app(shared)
+
+
+def run_web(airport):
+    """Local dev: build the app and serve it with Flask's dev server."""
+    app = build_web_app(airport)
     port = find_free_port(config.WEB_PORT)
     print(f"pattern-watch web mode: http://127.0.0.1:{port}")
-    # Flask's dev server is fine here — single user, local demo.
+    # Flask's dev server is fine here — single user, local demo. In
+    # production, wsgi.py serves the same app through gunicorn instead.
     app.run(port=port, debug=False)
 
 
