@@ -1,0 +1,176 @@
+"""CLI entry point for pattern-watch.
+
+    python main.py --mode terminal
+    python main.py --mode web
+    python main.py --mode web --airport "39.9088,-105.1172,5673,Rocky Mountain Metro (KBJC)"
+"""
+
+import argparse
+import socket
+import threading
+import time
+
+import config
+from borders import point_in_state
+from display import create_web_app, render_terminal
+from poller import OpenSkyPoller
+from traffic import TrafficTracker
+
+
+def parse_airport(text):
+    """Parse an --airport override: "lat,lon,elevation_ft,name".
+
+    The name is everything after the third comma, so it may itself
+    contain commas.
+    """
+    parts = text.split(",", 3)
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("expected lat,lon,elevation_ft,name")
+    try:
+        lat, lon, elev = float(parts[0]), float(parts[1]), float(parts[2])
+    except ValueError:
+        raise argparse.ArgumentTypeError("lat, lon and elevation_ft must be numbers")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise argparse.ArgumentTypeError("lat/lon out of range")
+    name = parts[3].strip() or "custom airport"
+    return config.Airport(name=name, lat=lat, lon=lon, elevation_ft=elev)
+
+
+def run_terminal(airport):
+    """Poll forever, repainting the terminal table each cycle."""
+    poller = OpenSkyPoller(airport)
+    tracker = TrafficTracker(airport)
+    while True:
+        states = poller.fetch_states()
+        aircraft, events = tracker.update(states)
+        render_terminal(airport, aircraft, events, poller.status)
+        time.sleep(config.POLL_INTERVAL_S)
+
+
+def find_free_port(start, attempts=10):
+    """Return the first free localhost port at or after `start`.
+
+    macOS in particular likes to squat on low ports (AirPlay uses 5000),
+    so instead of crashing with "address already in use" we probe by
+    actually binding, which is the only reliable test.
+    """
+    for port in range(start, start + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                print(f"port {port} is busy, trying {port + 1}")
+    raise SystemExit(f"no free port found in {start}-{start + attempts - 1}")
+
+
+def find_home_state(airport):
+    """Which state a custom --airport belongs to (for the picker)."""
+    for state in config.US_STATE_BOUNDS:
+        if point_in_state(airport.lat, airport.lon, state):
+            return state
+    return config.DEFAULT_STATE
+
+
+def run_web(airport):
+    """Poll in a background thread; Flask serves the latest snapshot.
+
+    The web UI picks a state, then an airport in it (or the whole state).
+    The Flask side writes the choice into shared["state"]/["airport"] and
+    sets the "switch" event; the poll loop rebuilds its poller/tracker.
+    """
+    # Airports offered per state; a custom --airport joins its own state.
+    airports_by_state = {s: list(a) for s, a in config.AIRPORTS_BY_STATE.items()}
+    home_state = config.DEFAULT_STATE
+    if not any(airport in a for a in airports_by_state.values()):
+        home_state = find_home_state(airport)
+        airports_by_state[home_state].insert(0, airport)
+
+    shared = {
+        "lock": threading.Lock(),
+        "state": home_state,
+        "airport": airport,
+        "airports_by_state": airports_by_state,
+        "switch": threading.Event(),
+        "aircraft": [],
+        "events": [],
+        "updated_at": None,
+        "status": "waiting for first poll",
+    }
+
+    def poll_loop():
+        current = None
+        poller = tracker = None
+        while True:
+            with shared["lock"]:
+                wanted = shared["airport"]
+                state = shared["state"]
+                watch = shared["airports_by_state"][state]
+            if wanted != current:
+                current = wanted
+                if current in config.STATEWIDE_BOUNDS:
+                    poller = OpenSkyPoller(
+                        current, bounds=config.STATEWIDE_BOUNDS[current]
+                    )
+                    # watch_airports: that state's fields, so "nearest
+                    # airport" references and overlap tags work anywhere;
+                    # region: filter to the real state border.
+                    tracker = TrafficTracker(current, watch_airports=watch,
+                                             statewide=True, region=state)
+                else:
+                    poller = OpenSkyPoller(current)
+                    tracker = TrafficTracker(current, watch_airports=watch)
+            states = poller.fetch_states()
+            aircraft, events = tracker.update(states)
+            with shared["lock"]:
+                # Drop results that raced with an airport switch.
+                if shared["airport"] == current:
+                    shared["aircraft"] = aircraft
+                    shared["events"] = events
+                    shared["updated_at"] = time.strftime("%H:%M:%S")
+                    shared["status"] = poller.status
+            # Sleep until the next poll, but wake early on a switch so
+            # the new airport doesn't wait a full interval for data.
+            if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
+                shared["switch"].clear()
+
+    # Daemon thread: dies with the main process, no shutdown dance needed.
+    threading.Thread(target=poll_loop, daemon=True).start()
+
+    app = create_web_app(shared)
+    port = find_free_port(config.WEB_PORT)
+    print(f"pattern-watch web mode: http://127.0.0.1:{port}")
+    # Flask's dev server is fine here — single user, local demo.
+    app.run(port=port, debug=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Live ADS-B traffic picture for an untowered airport."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["terminal", "web"],
+        default="terminal",
+        help="terminal table or Leaflet map served on localhost (default: terminal)",
+    )
+    parser.add_argument(
+        "--airport",
+        type=parse_airport,
+        default=config.AIRPORT,
+        metavar='"lat,lon,elevation_ft,name"',
+        help=f"override the default airport ({config.AIRPORT.name})",
+    )
+    args = parser.parse_args()
+
+    try:
+        if args.mode == "terminal":
+            run_terminal(args.airport)
+        else:
+            run_web(args.airport)
+    except KeyboardInterrupt:
+        print("\nbye")
+
+
+if __name__ == "__main__":
+    main()
