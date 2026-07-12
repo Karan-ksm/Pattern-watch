@@ -168,15 +168,20 @@ def create_web_app(shared):
                 }
                 for v in shared["views"].values()
             ]
-        test_url = config.ADSBLOL_POINT_URL.format(
-            lat="40.0", lon="-105.0", radius_nm="5"
-        )
-        t0 = time.time()
-        try:
-            resp = requests.get(test_url, timeout=8)
-            outbound = f"HTTP {resp.status_code} in {time.time() - t0:.1f}s"
-        except Exception as exc:  # diagnostic endpoint: report, never raise
-            outbound = f"{type(exc).__name__}: {exc}"[:300]
+        # The live outbound request costs API budget, so it only runs on
+        # demand (?probe=1) — health checks shouldn't feed rate limits.
+        if request.args.get("probe"):
+            test_url = config.ADSBLOL_POINT_URL.format(
+                lat="40.0", lon="-105.0", radius_nm="5"
+            )
+            t0 = time.time()
+            try:
+                resp = requests.get(test_url, timeout=8)
+                outbound = f"HTTP {resp.status_code} in {time.time() - t0:.1f}s"
+            except Exception as exc:  # diagnostic: report, never raise
+                outbound = f"{type(exc).__name__}: {exc}"[:300]
+        else:
+            outbound = "skipped (pass ?probe=1 to test)"
         return jsonify(
             poller_thread_alive=any(
                 t.name == "poller" for t in threading.enumerate()

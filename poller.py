@@ -9,6 +9,7 @@ the caller can skip that cycle and try again next time.
 """
 
 import math
+import time
 
 import requests
 
@@ -20,6 +21,18 @@ import config
 # that lose their far corners (the border filter hides the spill-over
 # anyway, so in practice only the largest states are affected).
 MAX_RADIUS_NM = 250
+
+# Self-throttling, shared by ALL pollers in the process (module-level:
+# per-viewer views mean several pollers, but adsb.lol rate-limits the
+# IP, so the budget is global). Requests are spaced at least
+# MIN_REQUEST_GAP_S apart, and a 429/420 pauses everything until the
+# server's Retry-After (default/cap below) has passed. Hosted instances
+# share egress IPs with other tenants, so limits can arrive regardless.
+MIN_REQUEST_GAP_S = 2.0
+BACKOFF_DEFAULT_S = 60
+BACKOFF_MAX_S = 300
+_next_request_at = 0.0
+_backoff_until = 0.0
 
 
 def bounding_box(airport, radius_nm):
@@ -75,6 +88,18 @@ class AdsbLolPoller:
         The distinction matters to the tracker: it should not age out
         aircraft just because a poll failed.
         """
+        global _next_request_at, _backoff_until
+
+        now = time.time()
+        if now < _backoff_until:
+            self.status = f"rate limited (retrying in {int(_backoff_until - now)}s)"
+            return None
+        # Space requests out; all pollers run on the one poll thread, so
+        # a plain sleep here throttles the whole process.
+        if _next_request_at > now:
+            time.sleep(_next_request_at - now)
+        _next_request_at = time.time() + MIN_REQUEST_GAP_S
+
         # Radius rounds UP: truncating 14.14 to 14 would leave the box
         # corners just outside the queried circle.
         url = config.ADSBLOL_POINT_URL.format(
@@ -88,7 +113,13 @@ class AdsbLolPoller:
             self.status = f"poll failed: {exc.__class__.__name__}"
             return None
 
-        if resp.status_code == 429:
+        # 429 is the standard too-many-requests answer; 420 is a
+        # rate-limit variant some deployments use. Honour Retry-After
+        # when the server sends one, within sane bounds.
+        if resp.status_code in (429, 420):
+            retry = resp.headers.get("Retry-After", "")
+            delay = int(retry) if retry.isdigit() else BACKOFF_DEFAULT_S
+            _backoff_until = time.time() + min(delay, BACKOFF_MAX_S)
             self.status = "rate limited"
             return None
         if resp.status_code != 200:

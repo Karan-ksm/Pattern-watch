@@ -622,11 +622,10 @@ async function postSelection(state, name) {
   }
 }
 
-// Picking a state jumps to its first airport (cheaper than statewide);
-// pick "Entire state" from the View list for everything at once.
+// Picking a state shows the whole state first — the natural overview —
+// and the View list then narrows down to a single airport.
 stateSelect.addEventListener("change", () => {
-  const airports = AIRPORTS_BY_STATE[stateSelect.value] || [];
-  postSelection(stateSelect.value, airports.length ? airports[0].name : null);
+  postSelection(stateSelect.value, null);
 });
 viewSelect.addEventListener("change", () => {
   postSelection(stateSelect.value, viewSelect.value || null);
