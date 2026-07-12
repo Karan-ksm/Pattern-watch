@@ -12,6 +12,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn wsgi:app --workers 1 --bind 0.0.0.0:$PORT
     envVars:
-      # Poll at half speed when hosted, to be polite to the free API.
+      # Fast updates for a live demo. adsb.lol has no request budget,
+      # polling pauses when nobody is watching, and a 429 (if they ever
+      # rate-limit us) just skips cycles gracefully.
       - key: POLL_INTERVAL_S
-        value: "30"
+        value: "5"
