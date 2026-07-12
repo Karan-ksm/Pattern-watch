@@ -75,10 +75,12 @@ class AdsbLolPoller:
         The distinction matters to the tracker: it should not age out
         aircraft just because a poll failed.
         """
+        # Radius rounds UP: truncating 14.14 to 14 would leave the box
+        # corners just outside the queried circle.
         url = config.ADSBLOL_POINT_URL.format(
             lat=f"{self.center_lat:.4f}",
             lon=f"{self.center_lon:.4f}",
-            radius_nm=f"{self.radius_nm:.0f}",
+            radius_nm=math.ceil(self.radius_nm),
         )
         try:
             resp = requests.get(url, timeout=10)
@@ -110,11 +112,15 @@ class AdsbLolPoller:
         adsb.lol already reports aviation units (feet, knots, ft/min).
         `alt_baro` is the number of feet OR the literal string "ground".
         Any field can be missing. Returns None if the aircraft is
-        unusable (no position) or falls outside our box — the query is a
-        circle around the box, so the corners spill over.
+        unusable (no position or no hex address — the tracker keys on
+        the hex, so keyless aircraft would collide) or falls outside our
+        box — the query is a circle around the box, so it spills over.
         """
         lat, lon = ac.get("lat"), ac.get("lon")
         if lat is None or lon is None:
+            return None
+        hexid = (ac.get("hex") or "").strip()
+        if not hexid:
             return None
         lamin, lomin, lamax, lomax = self.box
         if not (lamin <= lat <= lamax and lomin <= lon <= lomax):
@@ -125,7 +131,6 @@ class AdsbLolPoller:
         if not isinstance(alt, (int, float)):
             alt = None
 
-        hexid = (ac.get("hex") or "").strip()
         callsign = (ac.get("flight") or "").strip()
         vrate = ac.get("baro_rate")
         if vrate is None:

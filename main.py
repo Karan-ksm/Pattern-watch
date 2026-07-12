@@ -200,6 +200,12 @@ def build_web_app(airport, start_polling=True):
                 if shared.get("poller_started"):
                     return
                 shared["poller_started"] = True
+                # Stamp last_seen NOW: it was set at import time, which
+                # can be long ago (the app may sit unvisited after a
+                # deploy), and the route handler updates it only after
+                # this hook returns — without this the brand-new poller
+                # could see a stale value and start life idle.
+                shared["last_seen"] = time.time()
                 print(
                     f"[poller] starting: poll every {config.POLL_INTERVAL_S}s,"
                     f" idle after {config.IDLE_AFTER_S}s without visitors",

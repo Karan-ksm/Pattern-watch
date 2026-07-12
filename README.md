@@ -3,7 +3,7 @@
 A live traffic picture for untowered airports — any GA field in any US
 state — built on free ADS-B data from [adsb.lol](https://adsb.lol/).
 
-**Live demo:** _coming soon_ <!-- replace with your Render URL after deploying -->
+**Live demo:** [pattern-watch.onrender.com](https://pattern-watch.onrender.com)
 (free hosting sleeps when idle — the first visit takes ~30–60 s to wake)
 
 ## Why
@@ -108,7 +108,7 @@ traffic, raise `CEILING_AGL_FT` in `config.py`.
 | `config.py` | every tunable constant: airport lists, box size, poll rate, heuristic thresholds |
 | `poller.py` | adsb.lol REST client (point+radius query, box filter, 429/error handling) |
 | `traffic.py` | distance/bearing, state-label heuristics, cross-poll tracking, border filter |
-| `display.py` | terminal renderer + Flask app (`/`, `/api/traffic`, `/api/airport`, `/api/border/<state>`) |
+| `display.py` | terminal renderer + Flask app (`/`, `/api/traffic`, `/api/airport`, `/api/border/<state>`, `/api/health`) |
 | `borders.py` | point-in-polygon tests against real state outlines |
 | `states.py` | bounding boxes + abbreviations for the 50 states |
 | `airports_data.py` | **generated** — ~25 GA airports per state (OurAirports) |
@@ -177,6 +177,17 @@ free tier:
 3. Your app is live at `https://<service-name>.onrender.com` — put the
    link at the top of this README.
 
+A deployment gotcha this project already handles, documented because it
+cost a full evening to find: Render's gunicorn imports the app in the
+master process and forks the worker afterwards, and **threads do not
+survive a fork**. A poll thread started at import time runs (and logs!)
+in the master while the worker serves a frozen copy of the traffic
+snapshot — the map never updates, with nothing suspicious in the logs.
+The poller therefore starts on the first request (see `build_web_app` in
+`main.py`), which always runs in the worker. `GET /api/health` shows the
+poll thread's liveness plus a live outbound-connectivity test, so a
+hosted instance can be diagnosed with one curl.
+
 Hosted-demo behavior worth knowing:
 
 - **The view is shared.** There is one poller and one picture per server,
@@ -184,8 +195,8 @@ Hosted-demo behavior worth knowing:
   sidebar says so). Per-visitor views would need per-session pollers;
   out of scope for this demo.
 - **Polling pauses when nobody is watching** (5 min without a visitor)
-  and resumes on the next page load, so an unvisited demo spends no API
-  credits.
+  and resumes on the next page load, so an unvisited demo makes no API
+  calls at all.
 - **Free instances sleep** after ~15 min idle; the first request
   afterwards takes ~30–60 s while Render wakes it.
 
@@ -219,6 +230,11 @@ Hosted-demo behavior worth knowing:
   fields excluded by name) — a state's busiest GA field might be missing
   and a sleepy one included. Add favourites to `PRESET_AIRPORTS` in
   `config.py` or pass `--airport`.
+- **Very large states lose their far corners.** The traffic API is
+  queried as a circle (max 250 nm radius) around the state's bounding
+  box; for states bigger than that (Texas, Alaska, California, Montana)
+  the corners beyond the cap aren't fetched. Individual airports are
+  unaffected — every airport polls its own small box.
 - **Borders and boxes are approximations.** Border polygons are
   20m-simplified Census outlines; Alaska's *poll box* covers the mainland
   only because the Aleutians cross the 180° meridian (Aleutian airports
