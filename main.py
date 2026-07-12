@@ -152,8 +152,16 @@ def build_web_app(airport, start_polling=True):
             else:
                 poller = OpenSkyPoller(current)
                 tracker = TrafficTracker(current, watch_airports=watch)
+        t0 = time.time()
         states = poller.fetch_states()
         aircraft, events = tracker.update(states)
+        # Heartbeat: one line per cycle so hosted logs show whether the
+        # poller is alive and how long OpenSky takes to answer.
+        print(
+            f"[poller] {current.name}: {poller.status}"
+            f" ({len(aircraft)} aircraft, {time.time() - t0:.1f}s)",
+            flush=True,
+        )
         with shared["lock"]:
             # Drop results that raced with an airport switch.
             if shared["airport"] == current:
@@ -171,6 +179,11 @@ def build_web_app(airport, start_polling=True):
     # (start_polling=False exists for tests, which want the app without
     # any network activity.)
     if start_polling:
+        print(
+            f"[poller] starting: poll every {config.POLL_INTERVAL_S}s,"
+            f" idle after {config.IDLE_AFTER_S}s without visitors",
+            flush=True,
+        )
         threading.Thread(target=poll_loop, daemon=True).start()
 
     return create_web_app(shared)

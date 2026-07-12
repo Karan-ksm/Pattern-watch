@@ -22,6 +22,9 @@ M_TO_FT = 3.28084
 MS_TO_KT = 1.94384
 MS_TO_FPM = 196.850
 
+# How long to poll anonymously before retrying a failed auth.
+AUTH_RETRY_S = 300
+
 
 def bounding_box(airport, radius_nm):
     """Square box around the airport as (lamin, lomin, lamax, lomax).
@@ -56,7 +59,10 @@ class OpenSkyPoller:
         self.client_secret = (os.environ.get("OPENSKY_CLIENT_SECRET") or "").strip() or None
         self._token = None
         self._token_expiry = 0.0
-        self._auth_broken = False  # set after one failed auth; stops retry spam
+        # After a failed auth, don't retry until this time — auth failures
+        # can be transient (auth server down, network blip), so a cooldown
+        # beats giving up for the process's whole lifetime.
+        self._auth_retry_at = 0.0
         # Human-readable result of the most recent poll, for the displays.
         self.status = "not polled yet"
 
@@ -66,10 +72,12 @@ class OpenSkyPoller:
         """Return a bearer token, or None to poll anonymously.
 
         Tokens are cached and refreshed a minute before they expire. If
-        auth fails (bad credentials, auth server down) we warn once and
-        permanently fall back to anonymous mode rather than crashing.
+        auth fails (bad credentials, auth server down) we warn, poll
+        anonymously, and retry auth after a cooldown.
         """
-        if not (self.client_id and self.client_secret) or self._auth_broken:
+        if not (self.client_id and self.client_secret):
+            return None
+        if time.time() < self._auth_retry_at:
             return None
         if self._token and time.time() < self._token_expiry - 60:
             return self._token
@@ -93,8 +101,12 @@ class OpenSkyPoller:
             detail = f"{type(exc).__name__}: {exc}"
             if resp is not None:
                 detail += f" (HTTP {resp.status_code}: {resp.text[:200]})"
-            print(f"[poller] OpenSky auth failed - continuing anonymously - {detail}")
-            self._auth_broken = True
+            print(
+                f"[poller] OpenSky auth failed - continuing anonymously,"
+                f" retrying auth in {AUTH_RETRY_S}s - {detail}",
+                flush=True,
+            )
+            self._auth_retry_at = time.time() + AUTH_RETRY_S
             return None
 
     # --- polling ------------------------------------------------------------
