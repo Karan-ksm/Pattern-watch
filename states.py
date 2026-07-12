@@ -1,7 +1,7 @@
 """Approximate bounding boxes for all 50 US states.
 
 Each entry is (abbreviation, lamin, lomin, lamax, lomax) in degrees —
-the lat/lon rectangle handed to the OpenSky API for the statewide view.
+the lat/lon rectangle that defines the statewide poll area.
 These are rough rectangles, not real borders: neighbouring states'
 boxes overlap, and coastal boxes include some ocean. That's fine for
 "show me the traffic over this state".

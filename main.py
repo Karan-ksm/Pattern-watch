@@ -14,7 +14,7 @@ import traceback
 import config
 from borders import point_in_state
 from display import create_web_app, render_terminal
-from poller import OpenSkyPoller
+from poller import AdsbLolPoller
 from traffic import TrafficTracker
 
 
@@ -39,7 +39,7 @@ def parse_airport(text):
 
 def run_terminal(airport):
     """Poll forever, repainting the terminal table each cycle."""
-    poller = OpenSkyPoller(airport)
+    poller = AdsbLolPoller(airport)
     tracker = TrafficTracker(airport)
     while True:
         states = poller.fetch_states()
@@ -123,7 +123,7 @@ def build_web_app(airport, start_polling=True):
         """One iteration of the poll loop; returns the (possibly rebuilt)
         (current, poller, tracker) for the next cycle."""
         # Idle pause: nobody has looked at the page recently, so
-        # don't spend OpenSky credits on a picture nobody sees.
+        # don't hammer the API for a picture nobody sees.
         # /api/traffic wakes us instantly via the switch event.
         with shared["lock"]:
             idle = time.time() - shared["last_seen"] > config.IDLE_AFTER_S
@@ -141,7 +141,7 @@ def build_web_app(airport, start_polling=True):
         if wanted != current:
             current = wanted
             if current in config.STATEWIDE_BOUNDS:
-                poller = OpenSkyPoller(
+                poller = AdsbLolPoller(
                     current, bounds=config.STATEWIDE_BOUNDS[current]
                 )
                 # watch_airports: that state's fields, so "nearest
@@ -150,13 +150,13 @@ def build_web_app(airport, start_polling=True):
                 tracker = TrafficTracker(current, watch_airports=watch,
                                          statewide=True, region=state)
             else:
-                poller = OpenSkyPoller(current)
+                poller = AdsbLolPoller(current)
                 tracker = TrafficTracker(current, watch_airports=watch)
         t0 = time.time()
         states = poller.fetch_states()
         aircraft, events = tracker.update(states)
         # Heartbeat: one line per cycle so hosted logs show whether the
-        # poller is alive and how long OpenSky takes to answer.
+        # poller is alive and how long the API takes to answer.
         print(
             f"[poller] {current.name}: {poller.status}"
             f" ({len(aircraft)} aircraft, {time.time() - t0:.1f}s)",

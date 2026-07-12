@@ -1,8 +1,7 @@
 # pattern-watch
 
 A live traffic picture for untowered airports — any GA field in any US
-state — built on free ADS-B data from the
-[OpenSky Network](https://opensky-network.org/).
+state — built on free ADS-B data from [adsb.lol](https://adsb.lol/).
 
 **Live demo:** _coming soon_ <!-- replace with your Render URL after deploying -->
 (free hosting sleeps when idle — the first visit takes ~30–60 s to wake)
@@ -17,7 +16,7 @@ calls.
 
 pattern-watch is a small demo of what a "traffic picture" for one of these
 airports can look like: pick a state and one of its GA airports (or the
-whole state at once), and it polls the OpenSky Network for aircraft there,
+whole state at once), and it polls adsb.lol for aircraft there,
 works out each aircraft's distance and bearing from the field, and takes a
 rough guess at what each one is doing — on the ground, departing, flying
 the pattern, inbound, passing overhead, or just en route across the state.
@@ -59,12 +58,13 @@ symbology — untowered fields really are magenta on sectionals):
   public-domain OurAirports dataset; Colorado's list is hand-curated
   first) or "Entire state — all traffic". A custom `--airport` joins its
   own state automatically.
-- **Real state borders** — OpenSky can only be polled with a lat/lon
-  rectangle, so a statewide fetch would spill into neighbouring states.
+- **Real state borders** — the traffic API can only be polled with a
+  coarse shape (a circle around the state's bounding box), so a statewide
+  fetch would spill into neighbouring states.
   Traffic is filtered against the actual state border polygon (US Census
   data, point-in-polygon in `borders.py`) and the true border is drawn on
-  the map. The poll itself is still the rectangle — filtering happens
-  after download, so API cost is unchanged.
+  the map. The poll itself is still the coarse shape — filtering
+  happens after download.
 - **Range rings** at 2/5/10 nm around a watched airport, with a
   translucent red fill that fades as you zoom in (a fixed fill would tint
   the whole screen once you're inside a ring).
@@ -96,7 +96,7 @@ field (Centennial) showed 4 aircraft, including one 115 ft off the runway.
 
 So an empty airport view usually means the field is genuinely quiet —
 small GA airports have zero movements for hours at a time — or that
-low-altitude traffic is invisible to OpenSky's receivers (see
+low-altitude traffic is invisible to the ADS-B receivers (see
 Limitations). If you want the airport view to capture more passing
 traffic, raise `CEILING_AGL_FT` in `config.py`.
 
@@ -106,7 +106,7 @@ traffic, raise `CEILING_AGL_FT` in `config.py`.
 | --- | --- |
 | `main.py` | CLI entry; terminal loop and web-server startup |
 | `config.py` | every tunable constant: airport lists, box size, poll rate, heuristic thresholds |
-| `poller.py` | OpenSky REST client (OAuth2 or anonymous, 429/error handling, unit conversion) |
+| `poller.py` | adsb.lol REST client (point+radius query, box filter, 429/error handling) |
 | `traffic.py` | distance/bearing, state-label heuristics, cross-poll tracking, border filter |
 | `display.py` | terminal renderer + Flask app (`/`, `/api/traffic`, `/api/airport`, `/api/border/<state>`) |
 | `borders.py` | point-in-polygon tests against real state outlines |
@@ -148,30 +148,20 @@ These rules are deliberately simple and deliberately tunable — every
 number is a constant in `config.py`, and the tests pin the expected label
 for a set of hand-built cases so you can tune with a safety net.
 
-## OpenSky credentials (optional but recommended)
+## Data feed: adsb.lol (no account needed)
 
-Anonymous polling works out of the box but has a small daily budget
-(~400 API credits). A free OpenSky account raises that to ~4,000/day:
-create an **API client** in your account settings and export:
+Traffic comes from [adsb.lol](https://adsb.lol/), a community-run,
+open-source ADS-B aggregator: no API key, no rate-limit budget to manage,
+and — unlike the OpenSky Network this project originally used — it
+answers requests from cloud-hosted IPs, which is what makes the free
+Render deployment work. Be polite anyway: `POLL_INTERVAL_S` controls the
+poll rate (the hosted config halves it to 30 s), and polling pauses
+entirely when nobody is watching.
 
-```bash
-export OPENSKY_CLIENT_ID=your_client_id
-export OPENSKY_CLIENT_SECRET=your_client_secret
-```
-
-> Note: the original OpenSky API used username/password Basic Auth, and
-> some older tutorials still show that. OpenSky retired it in 2025 in
-> favour of OAuth2 client credentials, which is what this project uses.
-> If the variables are unset (or auth fails), pattern-watch quietly falls
-> back to anonymous polling.
-
-Budget math worth knowing: a 10 nm box costs ~1 credit per poll, a
-state-sized box up to ~4 (bigger state, bigger cost — Texas is the max
-tier). At the default 15-second interval that's ~240 credits/hour for one
-airport — fine for demo sessions, but for all-day running raise
-`POLL_INTERVAL_S` in `config.py` (30 s halves the burn). When the budget
-runs out the status badge shows "rate limited" and polling resumes
-automatically once it resets.
+> History: this project originally polled the OpenSky Network. That
+> works fine locally, but OpenSky's servers silently drop connections
+> from datacenter IP ranges, so the hosted demo could never reach it —
+> the switch to adsb.lol is what fixed hosting.
 
 ## Deploying (free)
 
@@ -182,10 +172,8 @@ free tier:
    this repo — it reads `render.yaml` and creates the web service
    (gunicorn serving `wsgi.py`, one worker, because the poller and the
    traffic snapshot live in that process's memory).
-2. In the service's **Environment** tab, add `OPENSKY_CLIENT_ID` and
-   `OPENSKY_CLIENT_SECRET` (strongly recommended for hosting — anonymous
-   credits run out fast). `POLL_INTERVAL_S` is preset to 30 s to stretch
-   the budget.
+2. No API credentials are needed — adsb.lol is free and auth-less.
+   `POLL_INTERVAL_S` is preset to 30 s to keep the hosted demo polite.
 3. Your app is live at `https://<service-name>.onrender.com` — put the
    link at the top of this README.
 
@@ -203,7 +191,7 @@ Hosted-demo behavior worth knowing:
 
 ## Data sources
 
-- **Traffic**: [OpenSky Network](https://opensky-network.org/) REST API.
+- **Traffic**: [adsb.lol](https://adsb.lol/) REST API (readsb JSON).
 - **Airports**: [OurAirports](https://ourairports.com/data/) (public
   domain). Regenerate with `python tools/generate_airports.py`.
 - **State borders**: US Census Bureau cartographic boundary files
@@ -217,14 +205,10 @@ Hosted-demo behavior worth knowing:
   the traffic there — older GA aircraft, gliders, ultralights, NORDO
   aircraft — is simply invisible to this tool. An empty screen does *not*
   mean an empty pattern.
-- **OpenSky's free-tier coverage is spotty at low altitude.** Reception
-  depends on volunteer ground stations; aircraft in the pattern (low, and
+- **Community coverage is spotty at low altitude.** Reception depends
+  on volunteer ground stations; aircraft in the pattern (low, and
   shielded by terrain) drop in and out. The tracker tolerates a few missed
   polls before declaring an aircraft gone, but gaps happen.
-- **The daily API budget is real.** Sustained polling — especially
-  statewide views — will eventually hit OpenSky's credit limit; the app
-  shows "rate limited" and keeps retrying rather than crashing, but the
-  picture goes stale until the budget resets.
 - **The state labels are rough heuristics, not certified logic.** A
   helicopter hovering, a glider circling, or a fast twin on a wide final
   will all be mislabelled sometimes. Real systems fuse radar, multi-sensor
@@ -248,7 +232,7 @@ Hosted-demo behavior worth knowing:
 
 - **Sensor fusion**: blend in a local ADS-B receiver (an RTL-SDR dongle
   running dump1090 costs ~$30) for second-by-second coverage right at the
-  field, using OpenSky only for the wider area.
+  field, using adsb.lol only for the wider area.
 - **Historical pattern stats**: log traffic over weeks and answer
   questions like "which runway do people actually use when the wind is
   calm?" or "when is the pattern busiest?"

@@ -1,10 +1,6 @@
 # Render.com blueprint: deploy pattern-watch as a free web service.
 # In the Render dashboard: New + -> Blueprint -> pick this repo.
-#
-# After the first deploy, set these in the service's Environment tab
-# (never commit credentials):
-#   OPENSKY_CLIENT_ID     - from your OpenSky account's API client
-#   OPENSKY_CLIENT_SECRET
+# No API credentials needed: adsb.lol is free and auth-less.
 #
 # Free-tier note: the instance sleeps after ~15 min without visitors;
 # the first request afterwards takes ~30-60 s while it wakes.
@@ -16,7 +12,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn wsgi:app --workers 1 --bind 0.0.0.0:$PORT
     envVars:
-      # Poll at half speed when hosted, to stretch the OpenSky
-      # credit budget across the day.
+      # Poll at half speed when hosted, to be polite to the free API.
       - key: POLL_INTERVAL_S
         value: "30"

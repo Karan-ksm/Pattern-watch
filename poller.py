@@ -1,29 +1,25 @@
-"""OpenSky Network REST client.
+"""adsb.lol REST client.
 
-Fetches aircraft state vectors inside a lat/lon bounding box around the
-airport. Handles optional OAuth2 authentication, rate limiting (HTTP 429)
-and the several ways the API can return nothing. The contract with the
+Fetches aircraft inside a lat/lon bounding box around the airport, using
+the free community adsb.lol aggregator (readsb JSON, no auth). We moved
+off OpenSky because its servers silently drop connections from cloud
+datacenter IPs, which broke the hosted deployment. The contract with the
 rest of the program: a bad poll NEVER raises — it just returns None so
 the caller can skip that cycle and try again next time.
 """
 
 import math
-import os
-import time
 
 import requests
 
 import config
 
-# Unit conversions. OpenSky reports metres and metres/second, but
-# aviation thinks in feet, knots and feet-per-minute, so we convert once
-# here at the boundary and the rest of the code never sees metric.
-M_TO_FT = 3.28084
-MS_TO_KT = 1.94384
-MS_TO_FPM = 196.850
-
-# How long to poll anonymously before retrying a failed auth.
-AUTH_RETRY_S = 300
+# adsb.lol can only be queried as a point + radius circle, so we ask for
+# the circle that circumscribes our box and filter the result back down
+# to the box. The API caps the radius; state-sized boxes bigger than
+# that lose their far corners (the border filter hides the spill-over
+# anyway, so in practice only the largest states are affected).
+MAX_RADIUS_NM = 250
 
 
 def bounding_box(airport, radius_nm):
@@ -43,8 +39,8 @@ def bounding_box(airport, radius_nm):
     )
 
 
-class OpenSkyPoller:
-    """Polls /states/all for one airport's bounding box."""
+class AdsbLolPoller:
+    """Polls adsb.lol for one airport's bounding box."""
 
     def __init__(self, airport, bounds=None):
         """Poll the airport's 10 nm box, or explicit `bounds`
@@ -52,62 +48,22 @@ class OpenSkyPoller:
         """
         self.airport = airport
         self.box = bounds if bounds is not None else bounding_box(airport, config.BOX_RADIUS_NM)
-        # Stripped: dashboard-pasted values often carry an invisible
-        # trailing newline, which the token endpoint rejects as a bad
-        # secret.
-        self.client_id = (os.environ.get("OPENSKY_CLIENT_ID") or "").strip() or None
-        self.client_secret = (os.environ.get("OPENSKY_CLIENT_SECRET") or "").strip() or None
-        self._token = None
-        self._token_expiry = 0.0
-        # After a failed auth, don't retry until this time — auth failures
-        # can be transient (auth server down, network blip), so a cooldown
-        # beats giving up for the process's whole lifetime.
-        self._auth_retry_at = 0.0
-        # Human-readable result of the most recent poll, for the displays.
-        self.status = "not polled yet"
-
-    # --- auth ---------------------------------------------------------------
-
-    def _get_token(self):
-        """Return a bearer token, or None to poll anonymously.
-
-        Tokens are cached and refreshed a minute before they expire. If
-        auth fails (bad credentials, auth server down) we warn, poll
-        anonymously, and retry auth after a cooldown.
-        """
-        if not (self.client_id and self.client_secret):
-            return None
-        if time.time() < self._auth_retry_at:
-            return None
-        if self._token and time.time() < self._token_expiry - 60:
-            return self._token
-        resp = None
-        try:
-            resp = requests.post(
-                config.OPENSKY_TOKEN_URL,
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            self._token = payload["access_token"]
-            self._token_expiry = time.time() + payload.get("expires_in", 1800)
-            return self._token
-        except (requests.RequestException, KeyError, ValueError) as exc:
-            detail = f"{type(exc).__name__}: {exc}"
-            if resp is not None:
-                detail += f" (HTTP {resp.status_code}: {resp.text[:200]})"
+        lamin, lomin, lamax, lomax = self.box
+        self.center_lat = (lamin + lamax) / 2
+        self.center_lon = (lomin + lomax) / 2
+        half_ns_nm = (lamax - lamin) / 2 * 60.0
+        half_ew_nm = (lomax - lomin) / 2 * 60.0 * math.cos(math.radians(self.center_lat))
+        radius = math.hypot(half_ns_nm, half_ew_nm)
+        if radius > MAX_RADIUS_NM:
             print(
-                f"[poller] OpenSky auth failed - continuing anonymously,"
-                f" retrying auth in {AUTH_RETRY_S}s - {detail}",
+                f"[poller] {airport.name}: box needs a {radius:.0f} nm query"
+                f" radius, capped at {MAX_RADIUS_NM} nm - far corners of the"
+                f" box are not covered",
                 flush=True,
             )
-            self._auth_retry_at = time.time() + AUTH_RETRY_S
-            return None
+        self.radius_nm = min(radius, MAX_RADIUS_NM)
+        # Human-readable result of the most recent poll, for the displays.
+        self.status = "not polled yet"
 
     # --- polling ------------------------------------------------------------
 
@@ -119,26 +75,19 @@ class OpenSkyPoller:
         The distinction matters to the tracker: it should not age out
         aircraft just because a poll failed.
         """
-        headers = {}
-        token = self._get_token()
-        if token:
-            headers["Authorization"] = "Bearer " + token
-
-        lamin, lomin, lamax, lomax = self.box
-        params = {"lamin": lamin, "lomin": lomin, "lamax": lamax, "lomax": lomax}
-
+        url = config.ADSBLOL_POINT_URL.format(
+            lat=f"{self.center_lat:.4f}",
+            lon=f"{self.center_lon:.4f}",
+            radius_nm=f"{self.radius_nm:.0f}",
+        )
         try:
-            resp = requests.get(
-                config.OPENSKY_STATES_URL, params=params, headers=headers, timeout=10
-            )
+            resp = requests.get(url, timeout=10)
         except requests.RequestException as exc:
             self.status = f"poll failed: {exc.__class__.__name__}"
             return None
 
         if resp.status_code == 429:
-            # OpenSky tells us how long to wait; we just skip cycles until then.
-            retry = resp.headers.get("X-Rate-Limit-Retry-After-Seconds", "?")
-            self.status = f"rate limited (retry after {retry}s)"
+            self.status = "rate limited"
             return None
         if resp.status_code != 200:
             self.status = f"poll failed: HTTP {resp.status_code}"
@@ -150,42 +99,45 @@ class OpenSkyPoller:
             self.status = "poll failed: bad JSON"
             return None
 
-        # OpenSky returns {"states": null} when the box is empty.
-        raw_states = payload.get("states") or []
-        aircraft = [ac for ac in (self._parse(s) for s in raw_states) if ac]
+        raw_states = payload.get("ac") or []
+        aircraft = [ac for ac in (self._parse(a) for a in raw_states) if ac]
         self.status = "poll OK"
         return aircraft
 
-    @staticmethod
-    def _parse(vector):
-        """Turn one positional state vector into a readable dict.
+    def _parse(self, ac):
+        """Turn one readsb-style aircraft dict into our readable dict.
 
-        OpenSky state vectors are plain arrays; the indices used below are
-        from their API docs (0=icao24, 1=callsign, 5=lon, 6=lat, 7=baro
-        altitude m, 8=on_ground, 9=velocity m/s, 10=true track deg,
-        11=vertical rate m/s). Any field can be null. Returns None if the
-        vector is unusable (no position).
+        adsb.lol already reports aviation units (feet, knots, ft/min).
+        `alt_baro` is the number of feet OR the literal string "ground".
+        Any field can be missing. Returns None if the aircraft is
+        unusable (no position) or falls outside our box — the query is a
+        circle around the box, so the corners spill over.
         """
-
-        def conv(value, factor):
-            return None if value is None else value * factor
-
-        try:
-            lon, lat = vector[5], vector[6]
-        except (IndexError, TypeError):
-            return None
+        lat, lon = ac.get("lat"), ac.get("lon")
         if lat is None or lon is None:
             return None
+        lamin, lomin, lamax, lomax = self.box
+        if not (lamin <= lat <= lamax and lomin <= lon <= lomax):
+            return None
 
-        callsign = (vector[1] or "").strip()
+        alt = ac.get("alt_baro")
+        on_ground = alt == "ground"
+        if not isinstance(alt, (int, float)):
+            alt = None
+
+        hexid = (ac.get("hex") or "").strip()
+        callsign = (ac.get("flight") or "").strip()
+        vrate = ac.get("baro_rate")
+        if vrate is None:
+            vrate = ac.get("geom_rate")
         return {
-            "icao24": vector[0],
-            "callsign": callsign or vector[0],  # fall back to the hex address
+            "icao24": hexid,
+            "callsign": callsign or hexid,  # fall back to the hex address
             "lat": lat,
             "lon": lon,
-            "baro_alt_ft": conv(vector[7], M_TO_FT),
-            "on_ground": bool(vector[8]),
-            "speed_kt": conv(vector[9], MS_TO_KT),
-            "track_deg": vector[10],
-            "vrate_fpm": conv(vector[11], MS_TO_FPM),
+            "baro_alt_ft": alt,
+            "on_ground": on_ground,
+            "speed_kt": ac.get("gs"),
+            "track_deg": ac.get("track"),
+            "vrate_fpm": vrate,
         }

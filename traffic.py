@@ -166,7 +166,7 @@ class TrafficTracker:
             self.tracks[icao] = {"ac": ac, "missed": 0}
 
         # Age out aircraft that didn't show up this poll. The STALE_POLLS
-        # grace period stops OpenSky's flaky low-altitude coverage from
+        # grace period stops flaky low-altitude ADS-B coverage from
         # producing constant arrive/leave flapping.
         for icao in list(self.tracks):
             if icao in seen:

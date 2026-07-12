@@ -10,7 +10,7 @@ writes state_borders.json mapping state name -> GeoJSON geometry
 (Polygon or MultiPolygon). ~700 KB, checked into the repo so the app
 never downloads anything at runtime.
 
-Why: the OpenSky API can only be polled with a lat/lon rectangle, so the
+Why: the traffic API can only be polled with a coarse shape, so the
 statewide view fetches a box — but a box spills into neighbouring
 states. These polygons let traffic.py keep only aircraft actually inside
 the selected state (and let the map draw the true border).

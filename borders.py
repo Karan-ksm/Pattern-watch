@@ -1,6 +1,6 @@
 """Real state border polygons + point-in-state tests.
 
-The OpenSky API can only be queried with a lat/lon rectangle, so the
+The traffic API can only be queried with a coarse shape, so the
 statewide view polls a bounding box — which spills over into neighbouring
 states. This module loads the actual state outlines (generated into
 state_borders.json by tools/generate_borders.py from public-domain Census

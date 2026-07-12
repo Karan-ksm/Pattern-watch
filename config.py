@@ -68,9 +68,9 @@ DEFAULT_STATE = "Colorado"
 # Statewide view: every US state gets a sentinel "airport" whose lat/lon
 # is just the centre of its bounding box (used for map centring), polled
 # with the state's bounds from states.py instead of a 10 nm box.
-# Heads-up: a state-sized box costs far more OpenSky rate credits per
-# call than a small one (the bigger the state, the more it costs), so
-# anonymous polling hits 429s sooner — the poller skips those gracefully.
+# Heads-up: a state-sized box means a much bigger query and payload per
+# call than a small one; if the API ever rate-limits us (429) the poller
+# skips those cycles gracefully.
 STATEWIDE_SENTINELS = {
     name: Airport(
         name=f"{name} ({abbr}) — statewide",
@@ -107,7 +107,7 @@ CEILING_AGL_FT = 3500
 # --- Polling ----------------------------------------------------------------
 
 # Overridable via environment so a hosted demo can poll more slowly
-# (stretching the OpenSky credit budget) without code edits.
+# (being polite to the free API) without code edits.
 POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", 15))
 
 # Web mode: stop polling when nobody has looked at the page for this
@@ -116,7 +116,7 @@ POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", 15))
 IDLE_AFTER_S = 300
 
 # An aircraft missing from this many consecutive polls is considered to
-# have left the area. OpenSky's low-altitude coverage flickers, so we do
+# have left the area. ADS-B low-altitude coverage flickers, so we do
 # not drop anyone on a single missed poll.
 STALE_POLLS = 3
 
@@ -139,18 +139,13 @@ PATTERN_MAX_AGL_FT = 2000
 PATTERN_MAX_SPEED_KT = 130  # pattern speeds are slow; airliners never fit
 PATTERN_MAX_DIST_NM = 4     # the pattern hugs the field
 
-# --- OpenSky API -------------------------------------------------------------
+# --- adsb.lol API ------------------------------------------------------------
 
-OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
-
-# OpenSky retired username/password auth in 2025 in favour of OAuth2
-# client credentials. Set OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET in the
-# environment to use your account; without them we poll anonymously
-# (which works, just with lower rate limits).
-OPENSKY_TOKEN_URL = (
-    "https://auth.opensky-network.org/auth/realms/"
-    "opensky-network/protocol/openid-connect/token"
-)
+# Free community ADS-B aggregator, readsb JSON format, no auth or API
+# key. (We moved off OpenSky: it silently drops connections from cloud
+# datacenter IPs, so the hosted deployment could never reach it.)
+# Query shape: aircraft within {radius_nm} nautical miles of a point.
+ADSBLOL_POINT_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
 
 # --- Display -----------------------------------------------------------------
 
