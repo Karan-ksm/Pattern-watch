@@ -144,13 +144,21 @@ PATTERN_MAX_AGL_FT = 2000
 PATTERN_MAX_SPEED_KT = 130  # pattern speeds are slow; airliners never fit
 PATTERN_MAX_DIST_NM = 4     # the pattern hugs the field
 
-# --- adsb.lol API ------------------------------------------------------------
+# --- ADS-B data providers ----------------------------------------------------
 
-# Free community ADS-B aggregator, readsb JSON format, no auth or API
-# key. (We moved off OpenSky: it silently drops connections from cloud
-# datacenter IPs, so the hosted deployment could never reach it.)
-# Query shape: aircraft within {radius_nm} nautical miles of a point.
-ADSBLOL_POINT_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
+# Free community ADS-B aggregators (readsb JSON, no auth), tried in
+# order. All serve the same data; when one rate-limits this IP — hosted
+# instances share egress IPs, so limits arrive through no fault of ours
+# — the next provider takes over and the map never goes stale. (We
+# moved off OpenSky entirely: it silently drops connections from cloud
+# datacenter IPs.) Query shape: aircraft within {radius_nm} nautical
+# miles of a point.
+ADSB_PROVIDERS = [
+    ("adsb.lol", "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"),
+    ("adsb.fi",
+     "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"),
+    ("airplanes.live", "https://api.airplanes.live/v2/point/{lat}/{lon}/{radius_nm}"),
+]
 
 # --- Display -----------------------------------------------------------------
 

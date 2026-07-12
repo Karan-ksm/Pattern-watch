@@ -1,11 +1,13 @@
-"""adsb.lol REST client.
+"""Community ADS-B REST client with provider failover.
 
-Fetches aircraft inside a lat/lon bounding box around the airport, using
-the free community adsb.lol aggregator (readsb JSON, no auth). We moved
-off OpenSky because its servers silently drop connections from cloud
-datacenter IPs, which broke the hosted deployment. The contract with the
-rest of the program: a bad poll NEVER raises — it just returns None so
-the caller can skip that cycle and try again next time.
+Fetches aircraft inside a lat/lon bounding box around the airport from
+free community aggregators (adsb.lol, adsb.fi, airplanes.live — all
+readsb JSON, no auth), trying each in turn so one provider's rate limit
+never blanks the map. We moved off OpenSky because its servers silently
+drop connections from cloud datacenter IPs, which broke the hosted
+deployment. The contract with the rest of the program: a bad poll NEVER
+raises — it just returns None so the caller can skip that cycle and try
+again next time.
 """
 
 import math
@@ -23,16 +25,18 @@ import config
 MAX_RADIUS_NM = 250
 
 # Self-throttling, shared by ALL pollers in the process (module-level:
-# per-viewer views mean several pollers, but adsb.lol rate-limits the
+# per-viewer views mean several pollers, but providers rate-limit the
 # IP, so the budget is global). Requests are spaced at least
-# MIN_REQUEST_GAP_S apart, and a 429/420 pauses everything until the
-# server's Retry-After (default/cap below) has passed. Hosted instances
-# share egress IPs with other tenants, so limits can arrive regardless.
+# MIN_REQUEST_GAP_S apart. A 429/420 backs off THAT provider until its
+# Retry-After (default/cap below) has passed and hands the poll to the
+# next provider in config.ADSB_PROVIDERS — so one provider's limit
+# never blanks the map. Hosted instances share egress IPs with other
+# tenants, so limits can arrive through no fault of ours.
 MIN_REQUEST_GAP_S = 2.0
 BACKOFF_DEFAULT_S = 60
 BACKOFF_MAX_S = 300
 _next_request_at = 0.0
-_backoff_until = 0.0
+_provider_backoff = {}  # provider name -> unix time when we may retry it
 
 
 def bounding_box(airport, radius_nm):
@@ -88,54 +92,70 @@ class AdsbLolPoller:
         The distinction matters to the tracker: it should not age out
         aircraft just because a poll failed.
         """
-        global _next_request_at, _backoff_until
+        global _next_request_at
 
-        now = time.time()
-        if now < _backoff_until:
-            self.status = f"rate limited (retrying in {int(_backoff_until - now)}s)"
-            return None
-        # Space requests out; all pollers run on the one poll thread, so
-        # a plain sleep here throttles the whole process.
-        if _next_request_at > now:
-            time.sleep(_next_request_at - now)
-        _next_request_at = time.time() + MIN_REQUEST_GAP_S
-
-        # Radius rounds UP: truncating 14.14 to 14 would leave the box
-        # corners just outside the queried circle.
-        url = config.ADSBLOL_POINT_URL.format(
-            lat=f"{self.center_lat:.4f}",
-            lon=f"{self.center_lon:.4f}",
-            radius_nm=math.ceil(self.radius_nm),
-        )
-        try:
-            resp = requests.get(url, timeout=10)
-        except requests.RequestException as exc:
-            self.status = f"poll failed: {exc.__class__.__name__}"
+        available = [
+            (name, template)
+            for name, template in config.ADSB_PROVIDERS
+            if time.time() >= _provider_backoff.get(name, 0)
+        ]
+        if not available:
+            soonest = min(_provider_backoff.values())
+            self.status = f"rate limited (retrying in {max(0, int(soonest - time.time()))}s)"
             return None
 
-        # 429 is the standard too-many-requests answer; 420 is a
-        # rate-limit variant some deployments use. Honour Retry-After
-        # when the server sends one, within sane bounds.
-        if resp.status_code in (429, 420):
-            retry = resp.headers.get("Retry-After", "")
-            delay = int(retry) if retry.isdigit() else BACKOFF_DEFAULT_S
-            _backoff_until = time.time() + min(delay, BACKOFF_MAX_S)
-            self.status = "rate limited"
-            return None
-        if resp.status_code != 200:
-            self.status = f"poll failed: HTTP {resp.status_code}"
-            return None
+        last_error = "poll failed"
+        for name, template in available:
+            # Space requests out; all pollers run on the one poll
+            # thread, so a plain sleep throttles the whole process.
+            now = time.time()
+            if _next_request_at > now:
+                time.sleep(_next_request_at - now)
+            _next_request_at = time.time() + MIN_REQUEST_GAP_S
 
-        try:
-            payload = resp.json()
-        except ValueError:
-            self.status = "poll failed: bad JSON"
-            return None
+            # Radius rounds UP: truncating 14.14 to 14 would leave the
+            # box corners just outside the queried circle.
+            url = template.format(
+                lat=f"{self.center_lat:.4f}",
+                lon=f"{self.center_lon:.4f}",
+                radius_nm=math.ceil(self.radius_nm),
+            )
+            try:
+                resp = requests.get(url, timeout=10)
+            except requests.RequestException as exc:
+                last_error = f"poll failed: {exc.__class__.__name__}"
+                continue
 
-        raw_states = payload.get("ac") or []
-        aircraft = [ac for ac in (self._parse(a) for a in raw_states) if ac]
-        self.status = "poll OK"
-        return aircraft
+            # 429 is the standard too-many-requests answer; 420 is a
+            # rate-limit variant some deployments use. Honour
+            # Retry-After when sent, within sane bounds, and let the
+            # next provider take this poll.
+            if resp.status_code in (429, 420):
+                retry = resp.headers.get("Retry-After", "")
+                delay = int(retry) if retry.isdigit() else BACKOFF_DEFAULT_S
+                _provider_backoff[name] = time.time() + min(delay, BACKOFF_MAX_S)
+                last_error = "rate limited"
+                continue
+            if resp.status_code != 200:
+                last_error = f"poll failed: HTTP {resp.status_code}"
+                continue
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                last_error = "poll failed: bad JSON"
+                continue
+
+            # adsb.lol and airplanes.live use "ac"; adsb.fi's readsb
+            # dump calls the same list "aircraft".
+            raw_states = payload.get("ac") or payload.get("aircraft") or []
+            aircraft = [ac for ac in (self._parse(a) for a in raw_states) if ac]
+            primary = config.ADSB_PROVIDERS[0][0]
+            self.status = "poll OK" if name == primary else f"poll OK (via {name})"
+            return aircraft
+
+        self.status = last_error
+        return None
 
     def _parse(self, ac):
         """Turn one readsb-style aircraft dict into our readable dict.

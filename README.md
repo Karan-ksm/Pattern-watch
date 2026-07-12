@@ -1,7 +1,9 @@
 # pattern-watch
 
 A live traffic picture for untowered airports — any GA field in any US
-state — built on free ADS-B data from [adsb.lol](https://adsb.lol/).
+state — built on free ADS-B data from community aggregators
+([adsb.lol](https://adsb.lol/), [adsb.fi](https://adsb.fi/),
+[airplanes.live](https://airplanes.live/)).
 
 **Live demo:** [pattern-watch.onrender.com](https://pattern-watch.onrender.com)
 (free hosting sleeps when idle — the first visit takes ~30–60 s to wake)
@@ -16,7 +18,7 @@ calls.
 
 pattern-watch is a small demo of what a "traffic picture" for one of these
 airports can look like: pick a state and one of its GA airports (or the
-whole state at once), and it polls adsb.lol for aircraft there,
+whole state at once), and it polls community ADS-B aggregators there,
 works out each aircraft's distance and bearing from the field, and takes a
 rough guess at what each one is doing — on the ground, departing, flying
 the pattern, inbound, passing overhead, or just en route across the state.
@@ -106,7 +108,7 @@ traffic, raise `CEILING_AGL_FT` in `config.py`.
 | --- | --- |
 | `main.py` | CLI entry; terminal loop and web-server startup |
 | `config.py` | every tunable constant: airport lists, box size, poll rate, heuristic thresholds |
-| `poller.py` | adsb.lol REST client (point+radius query, box filter, 429/error handling) |
+| `poller.py` | ADS-B client with provider failover (point+radius query, box filter, rate-limit backoff) |
 | `traffic.py` | distance/bearing, state-label heuristics, cross-poll tracking, border filter |
 | `display.py` | terminal renderer + Flask app (`/`, `/api/traffic`, `/api/airport`, `/api/border/<state>`, `/api/health`) |
 | `borders.py` | point-in-polygon tests against real state outlines |
@@ -148,15 +150,18 @@ These rules are deliberately simple and deliberately tunable — every
 number is a constant in `config.py`, and the tests pin the expected label
 for a set of hand-built cases so you can tune with a safety net.
 
-## Data feed: adsb.lol (no account needed)
+## Data feed: community aggregators (no account needed)
 
-Traffic comes from [adsb.lol](https://adsb.lol/), a community-run,
-open-source ADS-B aggregator: no API key, no rate-limit budget to manage,
-and — unlike the OpenSky Network this project originally used — it
-answers requests from cloud-hosted IPs, which is what makes the free
-Render deployment work. Be polite anyway: `POLL_INTERVAL_S` controls the
-poll rate (the hosted config halves it to 30 s), and polling pauses
-entirely when nobody is watching.
+Traffic comes from community-run, open-source ADS-B aggregators — no API
+key, and — unlike the OpenSky Network this project originally used —
+they answer requests from cloud-hosted IPs, which is what makes the free
+Render deployment work. The poller tries [adsb.lol](https://adsb.lol/),
+[adsb.fi](https://adsb.fi/) and [airplanes.live](https://airplanes.live/)
+in order (identical readsb JSON), with a per-provider backoff: if one
+rate-limits us, the next takes the poll and the map never goes stale.
+The app is polite regardless: requests are spaced ≥2 s apart process-wide
+no matter how many views are open, `POLL_INTERVAL_S` sets the per-view
+cadence, and polling stops entirely when nobody is watching.
 
 > History: this project originally polled the OpenSky Network. That
 > works fine locally, but OpenSky's servers silently drop connections
@@ -203,7 +208,9 @@ Hosted-demo behavior worth knowing:
 
 ## Data sources
 
-- **Traffic**: [adsb.lol](https://adsb.lol/) REST API (readsb JSON).
+- **Traffic**: [adsb.lol](https://adsb.lol/), [adsb.fi](https://adsb.fi/)
+  and [airplanes.live](https://airplanes.live/) REST APIs (readsb JSON,
+  tried in that order).
 - **Airports**: [OurAirports](https://ourairports.com/data/) (public
   domain). Regenerate with `python tools/generate_airports.py`.
 - **State borders**: US Census Bureau cartographic boundary files
