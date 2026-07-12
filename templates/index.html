@@ -38,7 +38,6 @@
     letter-spacing: .05em; margin-right: 5px; }
   #status, #countdown { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
   #countdown { margin-top: 2px; }
-  #shared-note { font-size: 10.5px; color: #a09880; font-style: italic; margin-top: 4px; }
   /* poll health dot: green live / amber rate-limited / red error / gray idle */
   .sdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     margin-right: 5px; }
@@ -155,7 +154,6 @@
     <select id="view-select" title="whole state or one airport"></select>
     <div id="status">waiting for first poll…</div>
     <div id="countdown"></div>
-    <div id="shared-note">shared demo — every visitor sees (and can change) the same view</div>
     <h2>Current traffic<span id="count-pill">0</span></h2>
     <ul id="traffic-list"></ul>
     <h2>Events</h2>
@@ -596,7 +594,7 @@ function switchAirport(ap, statewide, bounds, state) {
   STATE = state || STATE;
   STATEWIDE = !!statewide;
   BOUNDS = bounds || null;
-  // Keep the two pickers in sync (matters when another tab switched).
+  // Keep the two pickers in sync with the applied selection.
   stateSelect.value = STATE;
   populateViewSelect(STATE, STATEWIDE ? null : ap.name);
   for (const id of Object.keys(markers)) removeAircraft(id);
@@ -614,6 +612,10 @@ async function postSelection(state, name) {
     if (data.airport) {
       switchAirport(data.airport, data.statewide, data.bounds, data.state);
       refresh();
+      // A brand-new view answers "waiting for first poll" until the
+      // server's kicked poll cycle lands — grab the real picture soon
+      // after instead of waiting a whole poll interval.
+      setTimeout(refresh, 1500);
     }
   } catch (err) {
     document.getElementById("status").textContent = "couldn't switch view: " + err;
@@ -641,13 +643,14 @@ setInterval(() => {
 
 async function refresh() {
   try {
-    const resp = await fetch("/api/traffic");
+    // This viewer's own selection travels with every request — views
+    // are per-viewer, so nobody else's clicking can change our map.
+    const params = new URLSearchParams({
+      state: STATE,
+      view: STATEWIDE ? "" : AIRPORT.name,
+    });
+    const resp = await fetch(`/api/traffic?${params}`);
     const data = await resp.json();
-    // If the server's view doesn't match ours (e.g. switched in another
-    // tab), follow it before drawing anything.
-    if (data.airport.name !== AIRPORT.name) {
-      switchAirport(data.airport, data.statewide, data.bounds, data.state);
-    }
     updateMap(data.aircraft);
     updateSidebar(data);
     secondsToUpdate = POLL_MS / 1000;

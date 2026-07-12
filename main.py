@@ -74,15 +74,17 @@ def find_home_state(airport):
 
 
 def build_web_app(airport, start_polling=True):
-    """Assemble web mode: shared state, poll thread, and the Flask app.
+    """Assemble web mode: per-view state, poll thread, and the Flask app.
 
     Used by run_web() for local dev and by wsgi.py under gunicorn. All
     state is in-memory and the poller is a single daemon thread, which is
     why the production server must run exactly ONE worker process.
 
-    The web UI picks a state, then an airport in it (or the whole state).
-    The Flask side writes the choice into shared["state"]/["airport"] and
-    sets the "switch" event; the poll loop rebuilds its poller/tracker.
+    Every viewer keeps their own selection (the browser sends it as query
+    params), and the server maintains one "view" — poller + tracker +
+    latest snapshot — per distinct selection currently being watched.
+    Views that nobody has looked at for IDLE_AFTER_S stop being polled
+    and are dropped; at MAX_ACTIVE_VIEWS the stalest one is evicted.
     """
     # Airports offered per state; a custom --airport joins its own state.
     airports_by_state = {s: list(a) for s, a in config.AIRPORTS_BY_STATE.items()}
@@ -93,87 +95,111 @@ def build_web_app(airport, start_polling=True):
 
     shared = {
         "lock": threading.Lock(),
-        "state": home_state,
-        "airport": airport,
-        "airports_by_state": airports_by_state,
-        "switch": threading.Event(),
-        "aircraft": [],
-        "events": [],
-        "updated_at": None,
-        "status": "waiting for first poll",
-        "last_seen": time.time(),  # when someone last fetched /api/traffic
+        "airports_by_state": airports_by_state,  # never mutated after this
+        "default": (home_state, airport),
+        "views": {},  # (state, airport_name_or_None_for_statewide) -> view
+        "wake": threading.Event(),  # set when a new view wants its first poll
     }
 
+    def _make_view(state, view_airport):
+        watch = airports_by_state[state]
+        if view_airport in config.STATEWIDE_BOUNDS:
+            poller = AdsbLolPoller(
+                view_airport, bounds=config.STATEWIDE_BOUNDS[view_airport]
+            )
+            # watch_airports: that state's fields, so "nearest airport"
+            # references and overlap tags work anywhere; region: filter
+            # to the real state border.
+            tracker = TrafficTracker(view_airport, watch_airports=watch,
+                                     statewide=True, region=state)
+        else:
+            poller = AdsbLolPoller(view_airport)
+            tracker = TrafficTracker(view_airport, watch_airports=watch)
+        return {
+            "state": state,
+            "airport": view_airport,
+            "poller": poller,
+            "tracker": tracker,
+            "aircraft": [],
+            "events": [],
+            "updated_at": None,
+            "status": "waiting for first poll",
+            "last_seen": time.time(),
+        }
+
+    def touch_view(state, name):
+        """Get-or-create the view for (state, airport-name-or-None) and
+        mark it watched now. Returns the view dict, or None if the
+        selection doesn't exist. Exposed to display.py via `shared`.
+        """
+        airports = airports_by_state.get(state)
+        if airports is None:
+            return None
+        if name is None:
+            view_airport = config.STATEWIDE_SENTINELS[state]
+        else:
+            matches = [a for a in airports if a.name == name]
+            if not matches:
+                return None
+            view_airport = matches[0]
+        key = (state, name)
+        with shared["lock"]:
+            view = shared["views"].get(key)
+            if view is None:
+                views = shared["views"]
+                if len(views) >= config.MAX_ACTIVE_VIEWS:
+                    # Evict whichever view has gone unwatched longest.
+                    stalest = min(views, key=lambda k: views[k]["last_seen"])
+                    del views[stalest]
+                view = _make_view(state, view_airport)
+                views[key] = view
+                shared["wake"].set()  # first poll now, not next cycle
+            view["last_seen"] = time.time()
+            return view
+
+    shared["touch_view"] = touch_view
+
     def poll_loop():
-        current = None
-        poller = tracker = None
         while True:
             # Never let one bad cycle kill the thread: the app would keep
-            # serving pages while the map silently froze on stale data.
+            # serving pages while the maps silently froze on stale data.
             try:
-                current, poller, tracker = _poll_once(current, poller, tracker)
-            except Exception as exc:
+                _poll_cycle()
+            except Exception:
                 traceback.print_exc()
-                with shared["lock"]:
-                    shared["status"] = f"poller error: {type(exc).__name__}"
-                if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
-                    shared["switch"].clear()
+                if shared["wake"].wait(timeout=config.POLL_INTERVAL_S):
+                    shared["wake"].clear()
 
-    def _poll_once(current, poller, tracker):
-        """One iteration of the poll loop; returns the (possibly rebuilt)
-        (current, poller, tracker) for the next cycle."""
-        # Idle pause: nobody has looked at the page recently, so
-        # don't hammer the API for a picture nobody sees.
-        # /api/traffic wakes us instantly via the switch event.
+    def _poll_cycle():
+        """Poll every watched view once, then sleep until the next cycle
+        (waking early if a new view registers)."""
+        now = time.time()
         with shared["lock"]:
-            idle = time.time() - shared["last_seen"] > config.IDLE_AFTER_S
-            if idle:
-                shared["status"] = "idle - open the page to resume"
-        if idle:
-            if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
-                shared["switch"].clear()
-            return current, poller, tracker
-
-        with shared["lock"]:
-            wanted = shared["airport"]
-            state = shared["state"]
-            watch = shared["airports_by_state"][state]
-        if wanted != current:
-            current = wanted
-            if current in config.STATEWIDE_BOUNDS:
-                poller = AdsbLolPoller(
-                    current, bounds=config.STATEWIDE_BOUNDS[current]
-                )
-                # watch_airports: that state's fields, so "nearest
-                # airport" references and overlap tags work anywhere;
-                # region: filter to the real state border.
-                tracker = TrafficTracker(current, watch_airports=watch,
-                                         statewide=True, region=state)
-            else:
-                poller = AdsbLolPoller(current)
-                tracker = TrafficTracker(current, watch_airports=watch)
-        t0 = time.time()
-        states = poller.fetch_states()
-        aircraft, events = tracker.update(states)
-        # Heartbeat: one line per cycle so hosted logs show whether the
-        # poller is alive and how long the API takes to answer.
-        print(
-            f"[poller] {current.name}: {poller.status}"
-            f" ({len(aircraft)} aircraft, {time.time() - t0:.1f}s)",
-            flush=True,
-        )
-        with shared["lock"]:
-            # Drop results that raced with an airport switch.
-            if shared["airport"] == current:
-                shared["aircraft"] = aircraft
-                shared["events"] = events
-                shared["updated_at"] = time.strftime("%H:%M:%S")
-                shared["status"] = poller.status
-        # Sleep until the next poll, but wake early on a switch so
-        # the new airport doesn't wait a full interval for data.
-        if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
-            shared["switch"].clear()
-        return current, poller, tracker
+            views = shared["views"]
+            for key in [k for k, v in views.items()
+                        if now - v["last_seen"] > config.IDLE_AFTER_S]:
+                del views[key]  # nobody is watching this view anymore
+            active = list(views.items())
+        for key, view in active:
+            t0 = time.time()
+            states = view["poller"].fetch_states()
+            aircraft, events = view["tracker"].update(states)
+            # Heartbeat: one line per view per cycle so hosted logs show
+            # what is being polled and how long the API takes to answer.
+            print(
+                f"[poller] {view['airport'].name}: {view['poller'].status}"
+                f" ({len(aircraft)} aircraft, {time.time() - t0:.1f}s)",
+                flush=True,
+            )
+            with shared["lock"]:
+                # The view may have been evicted while we were polling.
+                if shared["views"].get(key) is view:
+                    view["aircraft"] = aircraft
+                    view["events"] = events
+                    view["updated_at"] = time.strftime("%H:%M:%S")
+                    view["status"] = view["poller"].status
+        if shared["wake"].wait(timeout=config.POLL_INTERVAL_S):
+            shared["wake"].clear()
 
     app = create_web_app(shared)
 
@@ -200,15 +226,10 @@ def build_web_app(airport, start_polling=True):
                 if shared.get("poller_started"):
                     return
                 shared["poller_started"] = True
-                # Stamp last_seen NOW: it was set at import time, which
-                # can be long ago (the app may sit unvisited after a
-                # deploy), and the route handler updates it only after
-                # this hook returns — without this the brand-new poller
-                # could see a stale value and start life idle.
-                shared["last_seen"] = time.time()
                 print(
                     f"[poller] starting: poll every {config.POLL_INTERVAL_S}s,"
-                    f" idle after {config.IDLE_AFTER_S}s without visitors",
+                    f" up to {config.MAX_ACTIVE_VIEWS} views, each idling"
+                    f" out after {config.IDLE_AFTER_S}s unwatched",
                     flush=True,
                 )
                 threading.Thread(

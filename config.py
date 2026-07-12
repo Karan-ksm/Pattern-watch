@@ -110,10 +110,15 @@ CEILING_AGL_FT = 3500
 # (being polite to the free API) without code edits.
 POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", 15))
 
-# Web mode: stop polling when nobody has looked at the page for this
-# long, and resume on the next visit. Matters most for a deployed demo —
-# no reason to spend API credits on a picture nobody is watching.
+# Web mode: stop polling a view (a state/airport selection) when nobody
+# has watched it for this long. Matters most for a deployed demo — no
+# reason to keep fetching a picture nobody is looking at.
 IDLE_AFTER_S = 300
+
+# Web mode: every viewer gets their own view, so this caps how many
+# distinct selections we poll concurrently. At the cap, the view that
+# has gone unwatched longest is evicted for the newcomer.
+MAX_ACTIVE_VIEWS = 12
 
 # An aircraft missing from this many consecutive polls is considered to
 # have left the area. ADS-B low-altitude coverage flickers, so we do

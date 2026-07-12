@@ -190,12 +190,13 @@ hosted instance can be diagnosed with one curl.
 
 Hosted-demo behavior worth knowing:
 
-- **The view is shared.** There is one poller and one picture per server,
-  so every visitor sees — and can change — the same state/airport (the
-  sidebar says so). Per-visitor views would need per-session pollers;
-  out of scope for this demo.
-- **Polling pauses when nobody is watching** (5 min without a visitor)
-  and resumes on the next page load, so an unvisited demo makes no API
+- **Every visitor gets their own view.** Each browser keeps its own
+  state/airport selection, and the server polls one view per distinct
+  selection being watched (up to `MAX_ACTIVE_VIEWS`, default 12, evicting
+  the stalest at the cap) — two people can watch different states
+  without affecting each other.
+- **Views nobody is watching stop being polled** (5 min after their last
+  request) and restart on demand, so an unvisited demo makes no API
   calls at all.
 - **Free instances sleep** after ~15 min idle; the first request
   afterwards takes ~30–60 s while Render wakes it.

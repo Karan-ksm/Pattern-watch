@@ -71,10 +71,11 @@ def render_terminal(airport, aircraft, events, status):
 def create_web_app(shared):
     """Build the Flask app for web mode.
 
-    `shared` is a plain dict owned by main.py: the poll thread writes the
-    traffic snapshot, and the /api/airport route below writes the airport
-    choice. Every access is guarded by shared["lock"]. A queue or a real
-    store would be overkill for one writer and one tiny snapshot.
+    `shared` is a plain dict owned by main.py. Each viewer keeps their
+    own selection client-side and passes it to /api/traffic as query
+    params; shared["touch_view"] resolves that to a per-view snapshot
+    that the poll thread keeps fresh. Mutable view state is guarded by
+    shared["lock"]; the airport lists never change after startup.
     """
     app = Flask(__name__)
 
@@ -89,10 +90,10 @@ def create_web_app(shared):
 
     @app.route("/")
     def index():
-        with shared["lock"]:
-            airport = shared["airport"]
-            state = shared["state"]
-            by_state = shared["airports_by_state"]
+        # Every page load starts at the server's default airport; the
+        # viewer's own selection takes over from there, client-side.
+        state, airport = shared["default"]
+        by_state = shared["airports_by_state"]
         statewide = airport in config.STATEWIDE_BOUNDS
         return render_template(
             "index.html",
@@ -111,49 +112,43 @@ def create_web_app(shared):
 
     @app.route("/api/traffic")
     def api_traffic():
+        """This viewer's traffic picture. ?state=<state>&view=<airport
+        name, or empty for statewide>; no params means the default
+        airport. Requesting a view keeps it alive (and creates it on
+        first request — its picture arrives within a poll cycle).
+        """
+        state = request.args.get("state")
+        if state is None:
+            state, airport = shared["default"]
+            name = None if airport in config.STATEWIDE_BOUNDS else airport.name
+        else:
+            name = request.args.get("view") or None
+        view = shared["touch_view"](state, name)
+        if view is None:
+            return jsonify(error="unknown state or airport"), 400
         with shared["lock"]:
-            # Mark the demo as watched so the poll loop keeps running
-            # (it pauses after IDLE_AFTER_S without visitors).
-            was_idle = str(shared["status"]).startswith("idle")
-            shared["last_seen"] = time.time()
-            response = jsonify(
-                aircraft=shared["aircraft"],
-                events=shared["events"],
-                updated_at=shared["updated_at"],
-                status=shared["status"],
-                **_selection_payload(shared["airport"], shared["state"]),
+            return jsonify(
+                aircraft=view["aircraft"],
+                events=view["events"],
+                updated_at=view["updated_at"],
+                status=view["status"],
+                **_selection_payload(view["airport"], view["state"]),
             )
-        if was_idle:
-            shared["switch"].set()  # wake the poll loop immediately
-        return response
 
     @app.route("/api/airport", methods=["POST"])
-    def set_airport():
-        """Switch view: {"state": "Texas", "name": "<airport name>" | null}.
-        A null name means the whole state (statewide).
+    def resolve_airport():
+        """Resolve a selection: {"state": "Texas", "name": "<airport
+        name>" | null} (null = whole state). Stateless — each viewer owns
+        their selection — but it pre-registers the view so its first poll
+        is already underway when the browser's /api/traffic lands.
         """
         data = request.get_json(silent=True) or {}
         state = data.get("state")
         name = data.get("name")
-        with shared["lock"]:
-            airports = shared["airports_by_state"].get(state)
-        if airports is None:
-            return jsonify(error="unknown state"), 400
-        if name is None:
-            airport = config.STATEWIDE_SENTINELS[state]
-        else:
-            matches = [a for a in airports if a.name == name]
-            if not matches:
-                return jsonify(error="unknown airport for that state"), 400
-            airport = matches[0]
-        with shared["lock"]:
-            shared["state"] = state
-            shared["airport"] = airport
-            shared["aircraft"] = []  # the old view's traffic is stale now
-            shared["events"] = []
-            shared["status"] = "switching..."
-        shared["switch"].set()  # wake the poll loop immediately
-        return jsonify(**_selection_payload(airport, state))
+        view = shared["touch_view"](state, name)
+        if view is None:
+            return jsonify(error="unknown state or airport"), 400
+        return jsonify(**_selection_payload(view["airport"], view["state"]))
 
     @app.route("/api/health")
     def api_health():
@@ -163,8 +158,16 @@ def create_web_app(shared):
         problems are visible from the outside without log access.
         """
         with shared["lock"]:
-            status = shared["status"]
-            updated_at = shared["updated_at"]
+            views = [
+                {
+                    "state": v["state"],
+                    "view": v["airport"].name,
+                    "status": v["status"],
+                    "updated_at": v["updated_at"],
+                    "watched_ago_s": round(time.time() - v["last_seen"], 1),
+                }
+                for v in shared["views"].values()
+            ]
         test_url = config.ADSBLOL_POINT_URL.format(
             lat="40.0", lon="-105.0", radius_nm="5"
         )
@@ -178,10 +181,10 @@ def create_web_app(shared):
             poller_thread_alive=any(
                 t.name == "poller" for t in threading.enumerate()
             ),
-            status=status,
-            updated_at=updated_at,
+            active_views=views,
             poll_interval_s=config.POLL_INTERVAL_S,
             idle_after_s=config.IDLE_AFTER_S,
+            max_active_views=config.MAX_ACTIVE_VIEWS,
             outbound_test=outbound,
         )
 
