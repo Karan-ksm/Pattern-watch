@@ -9,6 +9,7 @@ import argparse
 import socket
 import threading
 import time
+import traceback
 
 import config
 from borders import point_in_state
@@ -107,49 +108,64 @@ def build_web_app(airport, start_polling=True):
         current = None
         poller = tracker = None
         while True:
-            # Idle pause: nobody has looked at the page recently, so
-            # don't spend OpenSky credits on a picture nobody sees.
-            # /api/traffic wakes us instantly via the switch event.
-            with shared["lock"]:
-                idle = time.time() - shared["last_seen"] > config.IDLE_AFTER_S
-                if idle:
-                    shared["status"] = "idle - open the page to resume"
-            if idle:
+            # Never let one bad cycle kill the thread: the app would keep
+            # serving pages while the map silently froze on stale data.
+            try:
+                current, poller, tracker = _poll_once(current, poller, tracker)
+            except Exception as exc:
+                traceback.print_exc()
+                with shared["lock"]:
+                    shared["status"] = f"poller error: {type(exc).__name__}"
                 if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
                     shared["switch"].clear()
-                continue
 
-            with shared["lock"]:
-                wanted = shared["airport"]
-                state = shared["state"]
-                watch = shared["airports_by_state"][state]
-            if wanted != current:
-                current = wanted
-                if current in config.STATEWIDE_BOUNDS:
-                    poller = OpenSkyPoller(
-                        current, bounds=config.STATEWIDE_BOUNDS[current]
-                    )
-                    # watch_airports: that state's fields, so "nearest
-                    # airport" references and overlap tags work anywhere;
-                    # region: filter to the real state border.
-                    tracker = TrafficTracker(current, watch_airports=watch,
-                                             statewide=True, region=state)
-                else:
-                    poller = OpenSkyPoller(current)
-                    tracker = TrafficTracker(current, watch_airports=watch)
-            states = poller.fetch_states()
-            aircraft, events = tracker.update(states)
-            with shared["lock"]:
-                # Drop results that raced with an airport switch.
-                if shared["airport"] == current:
-                    shared["aircraft"] = aircraft
-                    shared["events"] = events
-                    shared["updated_at"] = time.strftime("%H:%M:%S")
-                    shared["status"] = poller.status
-            # Sleep until the next poll, but wake early on a switch so
-            # the new airport doesn't wait a full interval for data.
+    def _poll_once(current, poller, tracker):
+        """One iteration of the poll loop; returns the (possibly rebuilt)
+        (current, poller, tracker) for the next cycle."""
+        # Idle pause: nobody has looked at the page recently, so
+        # don't spend OpenSky credits on a picture nobody sees.
+        # /api/traffic wakes us instantly via the switch event.
+        with shared["lock"]:
+            idle = time.time() - shared["last_seen"] > config.IDLE_AFTER_S
+            if idle:
+                shared["status"] = "idle - open the page to resume"
+        if idle:
             if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
                 shared["switch"].clear()
+            return current, poller, tracker
+
+        with shared["lock"]:
+            wanted = shared["airport"]
+            state = shared["state"]
+            watch = shared["airports_by_state"][state]
+        if wanted != current:
+            current = wanted
+            if current in config.STATEWIDE_BOUNDS:
+                poller = OpenSkyPoller(
+                    current, bounds=config.STATEWIDE_BOUNDS[current]
+                )
+                # watch_airports: that state's fields, so "nearest
+                # airport" references and overlap tags work anywhere;
+                # region: filter to the real state border.
+                tracker = TrafficTracker(current, watch_airports=watch,
+                                         statewide=True, region=state)
+            else:
+                poller = OpenSkyPoller(current)
+                tracker = TrafficTracker(current, watch_airports=watch)
+        states = poller.fetch_states()
+        aircraft, events = tracker.update(states)
+        with shared["lock"]:
+            # Drop results that raced with an airport switch.
+            if shared["airport"] == current:
+                shared["aircraft"] = aircraft
+                shared["events"] = events
+                shared["updated_at"] = time.strftime("%H:%M:%S")
+                shared["status"] = poller.status
+        # Sleep until the next poll, but wake early on a switch so
+        # the new airport doesn't wait a full interval for data.
+        if shared["switch"].wait(timeout=config.POLL_INTERVAL_S):
+            shared["switch"].clear()
+        return current, poller, tracker
 
     # Daemon thread: dies with the main process, no shutdown dance needed.
     # (start_polling=False exists for tests, which want the app without

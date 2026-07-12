@@ -49,8 +49,11 @@ class OpenSkyPoller:
         """
         self.airport = airport
         self.box = bounds if bounds is not None else bounding_box(airport, config.BOX_RADIUS_NM)
-        self.client_id = os.environ.get("OPENSKY_CLIENT_ID")
-        self.client_secret = os.environ.get("OPENSKY_CLIENT_SECRET")
+        # Stripped: dashboard-pasted values often carry an invisible
+        # trailing newline, which the token endpoint rejects as a bad
+        # secret.
+        self.client_id = (os.environ.get("OPENSKY_CLIENT_ID") or "").strip() or None
+        self.client_secret = (os.environ.get("OPENSKY_CLIENT_SECRET") or "").strip() or None
         self._token = None
         self._token_expiry = 0.0
         self._auth_broken = False  # set after one failed auth; stops retry spam
@@ -70,6 +73,7 @@ class OpenSkyPoller:
             return None
         if self._token and time.time() < self._token_expiry - 60:
             return self._token
+        resp = None
         try:
             resp = requests.post(
                 config.OPENSKY_TOKEN_URL,
@@ -85,8 +89,11 @@ class OpenSkyPoller:
             self._token = payload["access_token"]
             self._token_expiry = time.time() + payload.get("expires_in", 1800)
             return self._token
-        except (requests.RequestException, KeyError, ValueError):
-            print("[poller] OpenSky auth failed - continuing anonymously")
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            if resp is not None:
+                detail += f" (HTTP {resp.status_code}: {resp.text[:200]})"
+            print(f"[poller] OpenSky auth failed - continuing anonymously - {detail}")
             self._auth_broken = True
             return None
 
