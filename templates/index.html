@@ -24,9 +24,16 @@
   #map { flex: 1; position: relative; }
 
   /* --- sidebar ----------------------------------------------------------- */
-  #sidebar { width: 340px; overflow-y: auto; padding: 14px 16px;
+  /* A fixed column that never scrolls as a whole: the traffic list and
+     the event feed each scroll inside their own box, so a growing list
+     (or the browser restoring/anchoring scroll) can't shove the page
+     around. */
+  #sidebar { width: 340px; overflow: hidden; padding: 14px 16px;
     background: var(--paper); border-left: 3px solid var(--magenta);
-    box-sizing: border-box; }
+    box-sizing: border-box; display: flex; flex-direction: column; }
+  #traffic-list { flex: 1 1 auto; min-height: 120px; overflow-y: auto;
+    overflow-anchor: none; }
+  #event-list { flex: 0 0 auto; max-height: 150px; overflow-y: auto; }
   #sidebar h1 { font-size: 19px; margin: 0; letter-spacing: .02em; }
   #sidebar h1 .plane { color: var(--magenta); }
   #sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
