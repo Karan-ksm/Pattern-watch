@@ -175,18 +175,41 @@ def build_web_app(airport, start_polling=True):
             shared["switch"].clear()
         return current, poller, tracker
 
+    app = create_web_app(shared)
+
     # Daemon thread: dies with the main process, no shutdown dance needed.
     # (start_polling=False exists for tests, which want the app without
     # any network activity.)
+    #
+    # Started lazily on the FIRST REQUEST rather than at import: some
+    # gunicorn setups (Render's) import the app in the master process and
+    # fork the worker afterwards, and threads do not survive a fork. A
+    # thread started at import time polls happily in the master while the
+    # worker serving requests holds a fork-frozen copy of `shared` — the
+    # map never updates. The first request necessarily runs in the worker,
+    # so starting there puts the poller in the serving process under any
+    # server (gunicorn with or without preload, Flask dev server).
     if start_polling:
-        print(
-            f"[poller] starting: poll every {config.POLL_INTERVAL_S}s,"
-            f" idle after {config.IDLE_AFTER_S}s without visitors",
-            flush=True,
-        )
-        threading.Thread(target=poll_loop, name="poller", daemon=True).start()
+        start_lock = threading.Lock()
 
-    return create_web_app(shared)
+        @app.before_request
+        def ensure_poller():
+            if shared.get("poller_started"):
+                return
+            with start_lock:
+                if shared.get("poller_started"):
+                    return
+                shared["poller_started"] = True
+                print(
+                    f"[poller] starting: poll every {config.POLL_INTERVAL_S}s,"
+                    f" idle after {config.IDLE_AFTER_S}s without visitors",
+                    flush=True,
+                )
+                threading.Thread(
+                    target=poll_loop, name="poller", daemon=True
+                ).start()
+
+    return app
 
 
 def run_web(airport):
