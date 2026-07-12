@@ -184,7 +184,7 @@ def build_web_app(airport, start_polling=True):
             f" idle after {config.IDLE_AFTER_S}s without visitors",
             flush=True,
         )
-        threading.Thread(target=poll_loop, daemon=True).start()
+        threading.Thread(target=poll_loop, name="poller", daemon=True).start()
 
     return create_web_app(shared)
 

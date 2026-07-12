@@ -4,8 +4,10 @@ Neither mode owns the data — main.py runs the poll loop and hands the
 tracker's output to whichever display was requested.
 """
 
+import threading
 import time
 
+import requests
 from flask import Flask, jsonify, render_template, request
 
 import config
@@ -152,6 +154,36 @@ def create_web_app(shared):
             shared["status"] = "switching..."
         shared["switch"].set()  # wake the poll loop immediately
         return jsonify(**_selection_payload(airport, state))
+
+    @app.route("/api/health")
+    def api_health():
+        """Self-diagnosis for the hosted instance: is the poll thread
+        alive, what does it report, and can this server reach the
+        traffic API at all? Runs a live outbound request so connectivity
+        problems are visible from the outside without log access.
+        """
+        with shared["lock"]:
+            status = shared["status"]
+            updated_at = shared["updated_at"]
+        test_url = config.ADSBLOL_POINT_URL.format(
+            lat="40.0", lon="-105.0", radius_nm="5"
+        )
+        t0 = time.time()
+        try:
+            resp = requests.get(test_url, timeout=8)
+            outbound = f"HTTP {resp.status_code} in {time.time() - t0:.1f}s"
+        except Exception as exc:  # diagnostic endpoint: report, never raise
+            outbound = f"{type(exc).__name__}: {exc}"[:300]
+        return jsonify(
+            poller_thread_alive=any(
+                t.name == "poller" for t in threading.enumerate()
+            ),
+            status=status,
+            updated_at=updated_at,
+            poll_interval_s=config.POLL_INTERVAL_S,
+            idle_after_s=config.IDLE_AFTER_S,
+            outbound_test=outbound,
+        )
 
     @app.route("/api/border/<state>")
     def api_border(state):
