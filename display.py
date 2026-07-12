@@ -153,9 +153,9 @@ def create_web_app(shared):
     @app.route("/api/health")
     def api_health():
         """Self-diagnosis for the hosted instance: is the poll thread
-        alive, what does it report, and can this server reach the
-        traffic API at all? Runs a live outbound request so connectivity
-        problems are visible from the outside without log access.
+        alive and what is each active view reporting? Add ?probe=1 to
+        also live-test connectivity to every ADS-B provider, so a hosted
+        instance can be diagnosed from outside without log access.
         """
         with shared["lock"]:
             views = [

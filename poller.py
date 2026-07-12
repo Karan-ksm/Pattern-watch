@@ -160,7 +160,7 @@ class AdsbLolPoller:
     def _parse(self, ac):
         """Turn one readsb-style aircraft dict into our readable dict.
 
-        adsb.lol already reports aviation units (feet, knots, ft/min).
+        The aggregators already report aviation units (feet, knots, ft/min).
         `alt_baro` is the number of feet OR the literal string "ground".
         Any field can be missing. Returns None if the aircraft is
         unusable (no position or no hex address — the tracker keys on

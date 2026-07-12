@@ -166,7 +166,7 @@ cadence, and polling stops entirely when nobody is watching.
 > History: this project originally polled the OpenSky Network. That
 > works fine locally, but OpenSky's servers silently drop connections
 > from datacenter IP ranges, so the hosted demo could never reach it —
-> the switch to adsb.lol is what fixed hosting.
+> the switch to community aggregators is what fixed hosting.
 
 ## Deploying (free)
 
@@ -177,8 +177,9 @@ free tier:
    this repo — it reads `render.yaml` and creates the web service
    (gunicorn serving `wsgi.py`, one worker, because the poller and the
    traffic snapshot live in that process's memory).
-2. No API credentials are needed — adsb.lol is free and auth-less.
-   `POLL_INTERVAL_S` is preset to 30 s to keep the hosted demo polite.
+2. No API credentials are needed — the ADS-B providers are free and
+   auth-less. `POLL_INTERVAL_S` (5 s in the blueprint) sets the update
+   cadence; the poller self-throttles across views regardless.
 3. Your app is live at `https://<service-name>.onrender.com` — put the
    link at the top of this README.
 
@@ -248,9 +249,11 @@ Hosted-demo behavior worth knowing:
   only because the Aleutians cross the 180° meridian (Aleutian airports
   like Adak are still individually watchable — each airport polls its own
   box).
-- **15-second polling is slow** by air-traffic standards — a pattern
-  aircraft moves ~0.4 nm between polls (the map animates between fixes,
-  which looks continuous but is interpolation, not data).
+- **Seconds-scale polling is slow** by air-traffic standards — even at
+  the hosted 5 s cadence a pattern aircraft moves ~0.14 nm between
+  fixes, and with many views open the shared ≥2 s request spacing
+  stretches each view's effective refresh (the map animates between
+  fixes, which looks continuous but is interpolation, not data).
 
 ## What I'd do next
 
