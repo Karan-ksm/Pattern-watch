@@ -93,10 +93,19 @@ def build_web_app(airport, start_polling=True):
         home_state = find_home_state(airport)
         airports_by_state[home_state].insert(0, airport)
 
+    # Landing view: the statewide overview of the home state — the
+    # natural first picture — unless a specific --airport was requested
+    # (identity check: an explicit --airport is a fresh object, while
+    # the argparse default is config.AIRPORT itself).
+    if airport is config.AIRPORT:
+        default_airport = config.STATEWIDE_SENTINELS[home_state]
+    else:
+        default_airport = airport
+
     shared = {
         "lock": threading.Lock(),
         "airports_by_state": airports_by_state,  # never mutated after this
-        "default": (home_state, airport),
+        "default": (home_state, default_airport),
         "views": {},  # (state, airport_name_or_None_for_statewide) -> view
         "wake": threading.Event(),  # set when a new view wants its first poll
     }

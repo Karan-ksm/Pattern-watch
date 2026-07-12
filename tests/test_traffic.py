@@ -273,7 +273,16 @@ def test_web_app_builds_without_polling():
     app = build_web_app(config.AIRPORT, start_polling=False)
     client = app.test_client()
     assert client.get("/").status_code == 200
+    # No selection params: the landing view is the home state's
+    # statewide overview (an explicit --airport would land on itself).
     data = client.get("/api/traffic").get_json()
+    assert data["state"] == config.DEFAULT_STATE
+    assert data["statewide"] is True
+    # A viewer's own selection is honoured verbatim.
+    data = client.get(
+        "/api/traffic",
+        query_string={"state": config.DEFAULT_STATE, "view": config.AIRPORT.name},
+    ).get_json()
     assert data["airport"]["name"] == config.AIRPORT.name
     assert data["statewide"] is False
     assert client.get("/api/border/Colorado").status_code == 200
